@@ -4,15 +4,25 @@ Thin wrapper around the Gemini API. Its ONLY job is narration: turning
 already-computed ranked signals into a short, plain-English "why this
 matters" blurb. It does no analysis or scoring of its own.
 
-If GEMINI_API_KEY isn't set, falls back to a templated explanation so the
-rest of the app still works (useful for offline demos).
+Resilience contract
+-------------------
+* Missing GEMINI_API_KEY          → use _fallback_explanation (no crash)
+* google-genai SDK not installed  → use _fallback_explanation (no crash)
+* Authentication / permission err → log warning, use fallback (no crash)
+* Rate-limit / quota exceeded     → log warning, use fallback (no crash)
+* Any other API error             → log warning, use fallback (no crash)
+
+The scan pipeline must NEVER fail because the LLM is unavailable.
 """
 from __future__ import annotations
 
+import logging
 from typing import List
 
 from backend.config import LLM_ENABLED, LLM_MAX_TOKENS, LLM_MODEL
 from backend.models.schemas import FileRisk
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "You are a senior engineer writing terse, concrete explanations for a "
@@ -53,12 +63,60 @@ def _fallback_explanation(file_risk: FileRisk) -> str:
 
 
 def _build_client():
-    """Lazily import + construct the Gemini client so the module import
-    never fails just because the SDK/key isn't available."""
-    from google import genai
+    """
+    Lazily import + construct the Gemini client so the module import
+    never fails just because the SDK/key isn't available.
+
+    Raises
+    ------
+    RuntimeError  — wraps any import or constructor error with a clear message
+                    so callers can catch it uniformly.
+    """
+    try:
+        from google import genai  # type: ignore[import]
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'google-genai' package is not installed. "
+            "Run: pip install google-genai    (or set GEMINI_API_KEY='' to disable LLM)."
+        ) from exc
+
     from backend.config import GEMINI_API_KEY
 
-    return genai.Client(api_key=GEMINI_API_KEY)
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. "
+            "Add it to your .env file or environment variables."
+        )
+
+    try:
+        return genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as exc:
+        raise RuntimeError(f"Could not initialise Gemini client: {exc}") from exc
+
+
+def _call_llm(client, user_prompt: str) -> str:
+    """
+    Execute a single Gemini generate_content call and return the text.
+    Translates all SDK-level exceptions into RuntimeError so callers have
+    one exception type to catch.
+    """
+    try:
+        from google.genai import types  # type: ignore[import]
+
+        response = client.models.generate_content(
+            model=LLM_MODEL,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                max_output_tokens=LLM_MAX_TOKENS,
+            ),
+        )
+        return (response.text or "").strip()
+    except Exception as exc:
+        # Covers: PermissionDenied, ResourceExhausted, InvalidArgument,
+        # ServiceUnavailable, DeadlineExceeded, and any SDK-internal errors.
+        exc_name = type(exc).__name__
+        raise RuntimeError(f"Gemini API call failed ({exc_name}): {exc}") from exc
 
 
 def narrate_file(file_risk: FileRisk) -> str:
@@ -83,26 +141,46 @@ def narrate_file(file_risk: FileRisk) -> str:
 
     try:
         client = _build_client()
-        from google.genai import types
-        response = client.models.generate_content(
-            model=LLM_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                max_output_tokens=LLM_MAX_TOKENS,
+        text = _call_llm(client, user_prompt)
+        if not text:
+            logger.warning(
+                "Gemini returned empty text for %s — using fallback.", file_risk.file_path
             )
+            return _fallback_explanation(file_risk)
+        return text
+    except RuntimeError as exc:
+        # RuntimeError = client-build failure OR API call failure
+        logger.warning(
+            "LLM narration failed for %s: %s — using fallback explanation.",
+            file_risk.file_path,
+            exc,
         )
-        return (response.text.strip() if response.text else "") or _fallback_explanation(file_risk)
-    except Exception:
-        # Never let a narration failure break the scan — degrade gracefully.
+        return _fallback_explanation(file_risk)
+    except Exception as exc:
+        # Truly unexpected — still never crash the scan
+        logger.exception(
+            "Unexpected error in narrate_file for %s", file_risk.file_path
+        )
         return _fallback_explanation(file_risk)
 
 
 def narrate_top_files(ranked_files: List[FileRisk], top_n: int) -> List[FileRisk]:
-    """Mutates and returns the list, filling `.explanation` for the top N files only
-    (narration is the expensive step, so we don't run it for every file in the repo)."""
+    """
+    Mutates and returns the list, filling `.explanation` for the top N files only
+    (narration is the expensive step, so we don't run it for every file in the repo).
+    """
     for file_risk in ranked_files[:top_n]:
-        file_risk.explanation = narrate_file(file_risk)
+        try:
+            file_risk.explanation = narrate_file(file_risk)
+        except Exception as exc:
+            # Belt-and-suspenders: narrate_file already catches everything,
+            # but this ensures a single file error never stops the others.
+            logger.warning(
+                "narrate_file raised unexpectedly for %s: %s",
+                file_risk.file_path,
+                exc,
+            )
+            file_risk.explanation = _fallback_explanation(file_risk)
     return ranked_files
 
 
@@ -112,6 +190,7 @@ def summarize_scan(ranked_files: List[FileRisk], repo_path: str) -> str:
         return "No scannable files were found in this repository."
 
     top = ranked_files[0]
+
     if not LLM_ENABLED:
         return (
             f"Scanned {repo_path}. The highest-risk file is {top.file_path} "
@@ -121,7 +200,8 @@ def summarize_scan(ranked_files: List[FileRisk], repo_path: str) -> str:
         )
 
     file_lines = "\n".join(
-        f"- {f.file_path}: score {f.total_score}, {f.todo_count + f.fixme_count + f.hack_count} markers, "
+        f"- {f.file_path}: score {f.total_score}, "
+        f"{f.todo_count + f.fixme_count + f.hack_count} markers, "
         f"{f.commit_frequency} recent commits"
         for f in ranked_files[:10]
     )
@@ -133,18 +213,21 @@ def summarize_scan(ranked_files: List[FileRisk], repo_path: str) -> str:
 
     try:
         client = _build_client()
-        from google.genai import types
-        response = client.models.generate_content(
-            model=LLM_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                max_output_tokens=LLM_MAX_TOKENS,
-            )
-        )
-        return response.text.strip() if response.text else ""
-    except Exception:
-        return (
-            f"Scanned {repo_path}. The highest-risk file is {top.file_path} "
-            f"with a total score of {top.total_score:.2f}/1.0."
-        )
+        text = _call_llm(client, user_prompt)
+        if not text:
+            logger.warning("Gemini returned empty text for summarize_scan — using fallback.")
+            return _fallback_summary(top, repo_path)
+        return text
+    except RuntimeError as exc:
+        logger.warning("LLM summary failed: %s — using fallback.", exc)
+        return _fallback_summary(top, repo_path)
+    except Exception as exc:
+        logger.exception("Unexpected error in summarize_scan")
+        return _fallback_summary(top, repo_path)
+
+
+def _fallback_summary(top: FileRisk, repo_path: str) -> str:
+    return (
+        f"Scanned {repo_path}. The highest-risk file is {top.file_path} "
+        f"with a total score of {top.total_score:.2f}/1.0."
+    )
