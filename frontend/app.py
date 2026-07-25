@@ -64,7 +64,7 @@ def _run_scan(source: dict) -> None:
                 response = scan_repo_path(source["repo_path"])
             else:
                 response = scan_repo_zip(source["zip_bytes"], source["filename"])
-            st.session_state.results = response.get("results", response)
+            st.session_state.results = response.get("files", [])
         except ApiError as e:
             st.session_state.scan_error = str(e)
             st.session_state.results = None

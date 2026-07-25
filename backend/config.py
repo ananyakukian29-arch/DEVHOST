@@ -8,12 +8,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- LLM settings ---
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-5")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", 1024))
 # If no API key is set, scan_service falls back to templated (non-LLM) explanations
 # so the demo still works offline.
-LLM_ENABLED = bool(ANTHROPIC_API_KEY)
+LLM_ENABLED = bool(GEMINI_API_KEY)
 
 # --- Static analysis thresholds ---
 MAX_FUNCTION_LENGTH = int(os.environ.get("MAX_FUNCTION_LENGTH", 50))   # lines

@@ -8,10 +8,10 @@ live in exactly one place and are easy to tune during the demo.
 
 from typing import Tuple
 
-# Score is assumed to be normalized 0-100 by the backend scorer.
+# Score is normalized 0.0–1.0 by the backend scorer.
 # Tune these during rehearsal to match whatever repo you're demoing on.
-HIGH_RISK_THRESHOLD = 70
-MEDIUM_RISK_THRESHOLD = 40
+HIGH_RISK_THRESHOLD = 0.70
+MEDIUM_RISK_THRESHOLD = 0.40
 
 
 def risk_tier(score: float) -> str:
@@ -49,8 +49,8 @@ def score_to_emoji(score: float) -> str:
 
 
 def format_score(score: float) -> str:
-    """Consistent one-decimal display, e.g. 87.3"""
-    return f"{score:.1f}"
+    """Consistent display as a percentage-style string, e.g. '0.87'"""
+    return f"{score:.2f}"
 
 
 def format_commit_frequency(commits_last_90_days: int) -> str:
@@ -76,7 +76,7 @@ def truncate_path(path: str, max_len: int = 50) -> str:
 
 def score_bar(score: float, width: int = 20) -> str:
     """Text progress bar fallback for places we don't want a full chart, e.g. '████████░░ 82.0'"""
-    filled = round((score / 100) * width)
+    filled = round(score * width)  # score is 0.0–1.0
     filled = max(0, min(width, filled))
     return "█" * filled + "░" * (width - filled) + f" {format_score(score)}"
 
@@ -85,7 +85,7 @@ def split_high_medium_low(results: list) -> Tuple[list, list, list]:
     """Buckets a list of file-risk dicts (each with a 'score' key) by tier."""
     high, medium, low = [], [], []
     for item in results:
-        tier = risk_tier(item.get("score", 0))
+        tier = risk_tier(item.get("total_score", 0))
         if tier == "high":
             high.append(item)
         elif tier == "medium":

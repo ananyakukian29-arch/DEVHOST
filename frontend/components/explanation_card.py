@@ -24,7 +24,7 @@ def render_explanation_card(file_risk: dict) -> None:
     st.subheader("3. Why this matters")
 
     file_path = file_risk.get("file_path", "Unknown file")
-    score = file_risk.get("score", 0)
+    score = file_risk.get("total_score", 0)
     color = score_to_color(score)
     badge = score_to_badge(score)
     explanation = file_risk.get(
@@ -53,15 +53,15 @@ def render_explanation_card(file_risk: dict) -> None:
     c1.metric("TODO / FIXME / HACK", _todo_total(file_risk))
     c2.metric("Longest function", f"{file_risk.get('max_function_length', '—')} lines")
     c3.metric("Max nesting depth", file_risk.get("max_nesting_depth", "—"))
-    c4.metric("Commits (90d)", file_risk.get("commits_last_90_days", "—"))
+    c4.metric("Commits (recent)", file_risk.get("commit_frequency", "—"))
 
-    st.caption(format_commit_frequency(file_risk.get("commits_last_90_days", 0)))
+    st.caption(format_commit_frequency(file_risk.get("commit_frequency", 0)))
 
     with st.expander("Raw signal breakdown"):
         st.json(
             {
-                "impact_score": file_risk.get("impact"),
-                "frequency_score": file_risk.get("frequency"),
+                "impact_score": file_risk.get("impact_score"),
+                "frequency_score": file_risk.get("frequency_score"),
                 "final_score": score,
                 "todo_count": file_risk.get("todo_count"),
                 "fixme_count": file_risk.get("fixme_count"),

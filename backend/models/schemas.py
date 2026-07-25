@@ -4,7 +4,7 @@ Pydantic models shared across the API, services, and core layers.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -82,7 +82,7 @@ class FileRisk(BaseModel):
 class ScanResponse(BaseModel):
     """Output for POST /scan."""
     repo_path: str
-    scanned_at: datetime = Field(default_factory=datetime.utcnow)
+    scanned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     files_scanned: int
     files: List[FileRisk]
 
@@ -95,6 +95,6 @@ class ReportRequest(BaseModel):
 class ReportResponse(BaseModel):
     """A single narrative report summarizing the whole scan, for the demo's headline view."""
     repo_path: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     summary: str
     top_files: List[FileRisk]
